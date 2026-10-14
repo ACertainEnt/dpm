@@ -35,7 +35,6 @@ export class TelegramService {
       await bot.api.setMyCommands([
         { command: 'start', description: 'Start the bot' },
         { command: 'help', description: 'Show available commands' },
-        { command: 'status', description: 'Show bot status' },
         { command: 'servers', description: 'Show connected Discord servers' },
         { command: 'info', description: 'Get Discord member information (<discord_user_id>)' },
       ]);
@@ -105,22 +104,37 @@ export class TelegramService {
   }
 
   /**
-   * Send a member join notification to TELEGRAM_OWNER_ID.
+   * Send a member join notification to TELEGRAM_OWNER_ID and authorized customers for that guild.
    */
   static async notifyOwnerOfJoin(memberInfo: DiscordMemberInfo): Promise<void> {
-    try {
-      const config = getConfig();
-      const bot = getTelegramBot();
-      const message = buildTelegramJoinNotification(memberInfo);
+    const config = getConfig();
+    const bot = getTelegramBot();
+    const message = buildTelegramJoinNotification(memberInfo);
 
-      await bot.api.sendMessage(config.TELEGRAM_OWNER_ID, message, {
-        parse_mode: 'HTML',
-      });
-      Logger.info(`Sent join notification for user ${memberInfo.discordUserId} to Telegram owner ${config.TELEGRAM_OWNER_ID}`);
+    // Collect recipient Telegram IDs (owner is always included)
+    const recipientIds = new Set<number>();
+    recipientIds.add(config.TELEGRAM_OWNER_ID);
+
+    try {
+      const activeCustomers = await DatabaseRepository.getActiveCustomersForGuild(memberInfo.guildId);
+      for (const cust of activeCustomers) {
+        recipientIds.add(cust.telegramUserId);
+      }
     } catch (err) {
-      Logger.error(`Failed to send Telegram notification to owner:`, (err as Error).message);
-      recordTelegramWebhookError(err as Error);
-      // DO NOT throw or crash process!
+      Logger.error(`Failed to fetch active customers for guild ${memberInfo.guildId}:`, (err as Error).message);
+    }
+
+    for (const recipientId of recipientIds) {
+      try {
+        await bot.api.sendMessage(recipientId, message, {
+          parse_mode: 'HTML',
+        });
+        Logger.info(`Sent join notification for user ${memberInfo.discordUserId} to Telegram user ${recipientId}`);
+      } catch (err) {
+        Logger.error(`Failed to send Telegram notification to user ${recipientId}:`, (err as Error).message);
+        recordTelegramWebhookError(err as Error);
+        // DO NOT throw or crash process!
+      }
     }
   }
 

@@ -3,6 +3,8 @@ import {
   DiscordGuildConfig,
   DiscordMemberInfo,
   TelegramUserRecord,
+  CustomerRecord,
+  CustomerWithServers,
 } from '../types/index.js';
 import { Logger } from '../utils/logger.js';
 
@@ -163,6 +165,148 @@ export class DatabaseRepository {
       user.isAuthorized,
     ]);
     return res.rows[0];
+  }
+
+  // --- CUSTOMER AUTHORIZATIONS ---
+
+  static async addCustomer(telegramUserId: number, discordUserId: string): Promise<{ success: boolean; isDuplicate: boolean; customer?: CustomerRecord }> {
+    const pool = getPool();
+    try {
+      const query = `
+        INSERT INTO customers (telegram_user_id, discord_user_id, status, updated_at)
+        VALUES ($1, $2, 'active', NOW())
+        ON CONFLICT (telegram_user_id) DO NOTHING
+        RETURNING id, telegram_user_id AS "telegramUserId", discord_user_id AS "discordUserId",
+                  status, created_at AS "createdAt", updated_at AS "updatedAt";
+      `;
+      const res = await pool.query(query, [telegramUserId, discordUserId]);
+      if (res.rows.length === 0) {
+        return { success: false, isDuplicate: true };
+      }
+      return { success: true, isDuplicate: false, customer: res.rows[0] };
+    } catch (err) {
+      Logger.error('Error adding customer:', (err as Error).message);
+      throw err;
+    }
+  }
+
+  static async revokeCustomer(telegramUserId: number): Promise<CustomerRecord | null> {
+    const pool = getPool();
+    const query = `
+      UPDATE customers
+      SET status = 'revoked', updated_at = NOW()
+      WHERE telegram_user_id = $1
+      RETURNING id, telegram_user_id AS "telegramUserId", discord_user_id AS "discordUserId",
+                status, created_at AS "createdAt", updated_at AS "updatedAt";
+    `;
+    const res = await pool.query(query, [telegramUserId]);
+    return res.rows[0] || null;
+  }
+
+  static async getCustomerByTelegramId(telegramUserId: number): Promise<CustomerWithServers | null> {
+    const pool = getPool();
+    const queryCust = `
+      SELECT id, telegram_user_id AS "telegramUserId", discord_user_id AS "discordUserId",
+             status, created_at AS "createdAt", updated_at AS "updatedAt"
+      FROM customers
+      WHERE telegram_user_id = $1;
+    `;
+    const resCust = await pool.query(queryCust, [telegramUserId]);
+    if (resCust.rows.length === 0) return null;
+
+    const customer = resCust.rows[0];
+    const queryServers = `
+      SELECT guild_id AS "guildId"
+      FROM customer_servers
+      WHERE telegram_user_id = $1
+      ORDER BY guild_id ASC;
+    `;
+    const resServers = await pool.query(queryServers, [telegramUserId]);
+    const serverIds = resServers.rows.map((r: { guildId: string }) => r.guildId);
+
+    return { ...customer, serverIds };
+  }
+
+  static async getAllCustomers(): Promise<CustomerWithServers[]> {
+    const pool = getPool();
+    const query = `
+      SELECT c.id, c.telegram_user_id AS "telegramUserId", c.discord_user_id AS "discordUserId",
+             c.status, c.created_at AS "createdAt", c.updated_at AS "updatedAt",
+             COALESCE(
+               ARRAY_AGG(cs.guild_id ORDER BY cs.guild_id) FILTER (WHERE cs.guild_id IS NOT NULL),
+               '{}'
+             ) AS "serverIds"
+      FROM customers c
+      LEFT JOIN customer_servers cs ON c.telegram_user_id = cs.telegram_user_id
+      GROUP BY c.id, c.telegram_user_id, c.discord_user_id, c.status, c.created_at, c.updated_at
+      ORDER BY c.created_at ASC;
+    `;
+    const res = await pool.query(query);
+    return res.rows.map((row) => ({
+      ...row,
+      serverIds: Array.isArray(row.serverIds) ? row.serverIds : [],
+    }));
+  }
+
+  static async grantCustomerServer(telegramUserId: number, guildId: string): Promise<{ success: boolean; customerFound: boolean; isDuplicate: boolean; serverIds: string[] }> {
+    const pool = getPool();
+    const customer = await this.getCustomerByTelegramId(telegramUserId);
+    if (!customer) {
+      return { success: false, customerFound: false, isDuplicate: false, serverIds: [] };
+    }
+
+    try {
+      const query = `
+        INSERT INTO customer_servers (telegram_user_id, guild_id)
+        VALUES ($1, $2)
+        ON CONFLICT (telegram_user_id, guild_id) DO NOTHING;
+      `;
+      const res = await pool.query(query, [telegramUserId, guildId]);
+      const updatedCustomer = await this.getCustomerByTelegramId(telegramUserId);
+      return {
+        success: true,
+        customerFound: true,
+        isDuplicate: (res.rowCount ?? 0) === 0,
+        serverIds: updatedCustomer?.serverIds || [],
+      };
+    } catch (err) {
+      Logger.error('Error granting server to customer:', (err as Error).message);
+      throw err;
+    }
+  }
+
+  static async revokeCustomerServer(telegramUserId: number, guildId: string): Promise<{ success: boolean; customerFound: boolean; wasAssigned: boolean; serverIds: string[] }> {
+    const pool = getPool();
+    const customer = await this.getCustomerByTelegramId(telegramUserId);
+    if (!customer) {
+      return { success: false, customerFound: false, wasAssigned: false, serverIds: [] };
+    }
+
+    const query = `
+      DELETE FROM customer_servers
+      WHERE telegram_user_id = $1 AND guild_id = $2;
+    `;
+    const res = await pool.query(query, [telegramUserId, guildId]);
+    const updatedCustomer = await this.getCustomerByTelegramId(telegramUserId);
+    return {
+      success: true,
+      customerFound: true,
+      wasAssigned: (res.rowCount ?? 0) > 0,
+      serverIds: updatedCustomer?.serverIds || [],
+    };
+  }
+
+  static async getActiveCustomersForGuild(guildId: string): Promise<CustomerRecord[]> {
+    const pool = getPool();
+    const query = `
+      SELECT c.id, c.telegram_user_id AS "telegramUserId", c.discord_user_id AS "discordUserId",
+             c.status, c.created_at AS "createdAt", c.updated_at AS "updatedAt"
+      FROM customers c
+      JOIN customer_servers cs ON c.telegram_user_id = cs.telegram_user_id
+      WHERE cs.guild_id = $1 AND c.status = 'active';
+    `;
+    const res = await pool.query(query, [guildId]);
+    return res.rows;
   }
 
   // --- BOT EVENTS & IDEMPOTENCY ---
