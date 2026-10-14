@@ -35,6 +35,19 @@ export interface TelegramUserRecord {
   lastSeenAt?: Date;
 }
 
+export interface CustomerRecord {
+  id?: number;
+  telegramUserId: number;
+  discordUserId: string;
+  status: 'active' | 'revoked';
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface CustomerWithServers extends CustomerRecord {
+  serverIds: string[];
+}
+
 export interface BotStatusInfo {
   discordConnected: boolean;
   telegramWebhookStatus: string;
