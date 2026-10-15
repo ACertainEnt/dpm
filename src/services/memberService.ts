@@ -40,7 +40,7 @@ export class MemberService {
   }
 
   /**
-   * Process a member join event idempotently, persist data in PostgreSQL, and notify Telegram owner.
+   * Process a member join event idempotently, persist data in PostgreSQL, and notify authorized Telegram customers.
    */
   static async processMemberJoin(member: GuildMember): Promise<boolean> {
     const memberInfo = this.extractMemberInfo(member);
@@ -70,9 +70,9 @@ export class MemberService {
       Logger.error(`Failed to save member ${memberInfo.discordUserId} to database:`, (err as Error).message);
     }
 
-    // Forward notification to Telegram owner asynchronously and safely
+    // Forward notification to authorized Telegram customers asynchronously and safely
     try {
-      await TelegramService.notifyOwnerOfJoin(memberInfo);
+      await TelegramService.notifyJoinEvent(memberInfo);
     } catch (err) {
       Logger.error(`Telegram notification error (Discord processing continues):`, (err as Error).message);
     }
