@@ -3,7 +3,7 @@ import { getConfig } from '../config/index.js';
 import { Logger } from '../utils/logger.js';
 import { DatabaseRepository } from '../database/repository.js';
 import { testDatabaseConnection } from '../database/client.js';
-import { DiscordMemberInfo } from '../types/index.js';
+import { DiscordMemberInfo, CustomerRecord } from '../types/index.js';
 import { buildTelegramJoinNotification } from '../formatters/telegramNotification.js';
 
 let telegramBot: Bot | null = null;
@@ -15,6 +15,10 @@ export function getTelegramBot(): Bot {
     telegramBot = new Bot(config.TELEGRAM_BOT_TOKEN);
   }
   return telegramBot;
+}
+
+export function setTelegramBot(bot: Bot | null): void {
+  telegramBot = bot;
 }
 
 export function recordTelegramWebhookError(err: Error | string): void {
@@ -104,24 +108,30 @@ export class TelegramService {
   }
 
   /**
-   * Send a member join notification to TELEGRAM_OWNER_ID and authorized customers for that guild.
+   * Send a member join notification strictly to active customers authorized for that guild.
    */
-  static async notifyOwnerOfJoin(memberInfo: DiscordMemberInfo): Promise<void> {
-    const config = getConfig();
+  static async notifyJoinEvent(memberInfo: DiscordMemberInfo): Promise<void> {
     const bot = getTelegramBot();
     const message = buildTelegramJoinNotification(memberInfo);
 
-    // Collect recipient Telegram IDs (owner is always included)
-    const recipientIds = new Set<number>();
-    recipientIds.add(config.TELEGRAM_OWNER_ID);
-
+    let activeCustomers: CustomerRecord[] = [];
     try {
-      const activeCustomers = await DatabaseRepository.getActiveCustomersForGuild(memberInfo.guildId);
-      for (const cust of activeCustomers) {
-        recipientIds.add(cust.telegramUserId);
-      }
+      activeCustomers = await DatabaseRepository.getActiveCustomersForGuild(memberInfo.guildId);
     } catch (err) {
       Logger.error(`Failed to fetch active customers for guild ${memberInfo.guildId}:`, (err as Error).message);
+      return;
+    }
+
+    if (activeCustomers.length === 0) {
+      Logger.info(`No active customers subscribed to notifications for guild ${memberInfo.guildId}`);
+      return;
+    }
+
+    const recipientIds = new Set<number>();
+    for (const cust of activeCustomers) {
+      if (cust.status === 'active' && cust.telegramUserId) {
+        recipientIds.add(cust.telegramUserId);
+      }
     }
 
     for (const recipientId of recipientIds) {
@@ -129,12 +139,36 @@ export class TelegramService {
         await bot.api.sendMessage(recipientId, message, {
           parse_mode: 'HTML',
         });
-        Logger.info(`Sent join notification for user ${memberInfo.discordUserId} to Telegram user ${recipientId}`);
+        Logger.info(`Sent join notification for user ${memberInfo.discordUserId} to Telegram recipient ${recipientId}`);
       } catch (err) {
         Logger.error(`Failed to send Telegram notification to user ${recipientId}:`, (err as Error).message);
         recordTelegramWebhookError(err as Error);
-        // DO NOT throw or crash process!
+        // DO NOT throw or crash process, and DO NOT fallback to owner!
       }
+    }
+  }
+
+  /**
+   * Backward-compatible alias for notifyJoinEvent.
+   */
+  static async notifyOwnerOfJoin(memberInfo: DiscordMemberInfo): Promise<void> {
+    return this.notifyJoinEvent(memberInfo);
+  }
+
+  /**
+   * Send owner-specific system alert to TELEGRAM_OWNER_ID.
+   */
+  static async notifyOwnerSystemAlert(message: string): Promise<void> {
+    try {
+      const config = getConfig();
+      const bot = getTelegramBot();
+      await bot.api.sendMessage(config.TELEGRAM_OWNER_ID, message, {
+        parse_mode: 'HTML',
+      });
+      Logger.info(`Sent system alert to Telegram owner ${config.TELEGRAM_OWNER_ID}`);
+    } catch (err) {
+      Logger.error(`Failed to send system alert to owner:`, (err as Error).message);
+      recordTelegramWebhookError(err as Error);
     }
   }
 

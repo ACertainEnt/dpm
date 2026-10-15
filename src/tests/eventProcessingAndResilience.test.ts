@@ -17,7 +17,7 @@ describe('Discord Event Processing & Telegram Resilience', () => {
 
     // Mock Telegram notification to simulate failure
     const telegramSpy = vi
-      .spyOn(TelegramService, 'notifyOwnerOfJoin')
+      .spyOn(TelegramService, 'notifyJoinEvent')
       .mockRejectedValue(new Error('Telegram API connection timeout'));
 
     const mockMember = {
